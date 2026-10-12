@@ -1,0 +1,30 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# build outputs
+dist
+.next
+out
+build
+*.tsbuildinfo
+
+# turbo
+.turbo
+
+# env
+.env
+.env*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# misc
+.DS_Store
+*.pem
+coverage
+
+# Vendored bb.js browser build (copied from node_modules by scripts/vendor-bb.mjs)
+apps/web/public/vendor/

@@ -1,0 +1,240 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum TransactionType {
+  payment
+  config
+  trade
+  trustline
+  vault_deposit
+  vault_withdraw
+  confidential
+}
+
+enum TransactionStatus {
+  pending
+  ready
+  submitted
+  failed
+}
+
+enum ThresholdLevel {
+  low
+  medium
+  high
+}
+
+enum MemberRole {
+  owner
+  admin
+  member
+}
+
+enum ConfidentialRegStatus {
+  pending
+  registered
+}
+
+enum ConfidentialOp {
+  register
+  deposit
+  merge
+  transfer
+  withdraw
+}
+
+model User {
+  publicKey   String   @id
+  displayName String?
+  avatarUrl   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdAccounts     MultisigAccount[]    @relation("AccountCreatedBy")
+  memberships         AccountMember[]
+  proposedTxs         Transaction[]        @relation("TxProposedBy")
+  confidentialWrapKey ConfidentialWrapKey?
+
+  @@map("users")
+}
+
+model MultisigAccount {
+  id               String   @id @default(cuid())
+  name             String
+  stellarAccountId String   @unique
+  network          String   @default("mainnet")
+  createdBy        String
+  low              Int
+  medium           Int
+  high             Int
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  creator                  User                      @relation("AccountCreatedBy", fields: [createdBy], references: [publicKey])
+  members                  AccountMember[]
+  transactions             Transaction[]
+  activityLogs             ActivityLog[]
+  balanceSnapshots         BalanceSnapshot[]
+  confidentialRegistration ConfidentialRegistration?
+  confidentialEnvelopes    ConfidentialKeyEnvelope[]
+  confidentialOpenings     ConfidentialOpening[]
+
+  @@index([createdBy])
+  @@map("multisig_accounts")
+}
+
+model AccountMember {
+  id        String     @id @default(cuid())
+  accountId String
+  publicKey String
+  weight    Int
+  role      MemberRole @default(member)
+  createdAt DateTime   @default(now())
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User            @relation(fields: [publicKey], references: [publicKey])
+
+  @@unique([accountId, publicKey])
+  @@index([publicKey])
+  @@map("account_members")
+}
+
+model Transaction {
+  id                String            @id @default(cuid())
+  accountId         String
+  type              TransactionType
+  xdr               String
+  status            TransactionStatus @default(pending)
+  requiredThreshold Int
+  proposedBy        String
+  memo              String?
+  /// Stellar network this envelope targets. "mainnet" for every existing
+  /// transaction type; "testnet" only for vault_deposit against DeFindex's
+  /// testnet vaults (see @cluster/stellar's opt-in testnet passphrase/RPC).
+  network           String            @default("mainnet")
+  /// Off-chain config change (member add/remove, thresholds) applied to the
+  /// roster only after this transaction is submitted on-chain. See
+  /// `configChangeSchema` in @cluster/shared.
+  pendingChange     Json?
+  submittedHash     String?
+  /// Human-readable reason for the last on-chain failure (decoded Stellar
+  /// result codes). Cleared implicitly by never reusing failed envelopes.
+  lastError         String?
+  /// Which confidential operation this pipeline row represents, so the UI can
+  /// label it (register/deposit/merge/transfer/withdraw) WITHOUT decrypting
+  /// anything. Null for every non-confidential transaction. See §5.2.
+  confidentialOp    ConfidentialOp?
+  /// Opaque client-encrypted blob attached to a confidential proposal so
+  /// co-signers can decrypt the transfer detail (amount/recipient) before
+  /// signing. Base64 JSON envelope; ciphertext inside is XChaCha20-Poly1305
+  /// under the account's k_store — the server never sees plaintext. Null for
+  /// every other transaction.
+  confidentialPayload String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  account    MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  proposer   User            @relation("TxProposedBy", fields: [proposedBy], references: [publicKey])
+  signatures Signature[]
+
+  @@index([accountId])
+  @@index([status])
+  @@map("transactions")
+}
+
+model Signature {
+  id              String   @id @default(cuid())
+  transactionId   String
+  signerPublicKey String
+  signatureXdr    String
+  weight          Int
+  createdAt       DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@unique([transactionId, signerPublicKey])
+  @@map("signatures")
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  accountId String
+  actor     String
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@map("activity_logs")
+}
+
+model BalanceSnapshot {
+  id          String   @id @default(cuid())
+  accountId   String
+  assetCode   String
+  assetIssuer String?
+  amount      Decimal  @db.Decimal(38, 7)
+  capturedAt  DateTime @default(now())
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, capturedAt])
+  @@map("balance_snapshots")
+}
+
+model ConfidentialRegistration {
+  id             String                @id @default(cuid())
+  accountId      String                @unique
+  tokenContract  String
+  auditorId      Int
+  status         ConfidentialRegStatus @default(pending)
+  spendingPubKey String
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}
+
+model ConfidentialWrapKey {
+  id            String   @id @default(cuid())
+  userPublicKey String   @unique
+  wrapPublicKey String
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userPublicKey], references: [publicKey], onDelete: Cascade)
+}
+
+model ConfidentialKeyEnvelope {
+  id              String   @id @default(cuid())
+  accountId       String
+  memberPublicKey String
+  ciphertext      String
+  createdAt       DateTime @default(now())
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, memberPublicKey])
+  @@index([accountId])
+}
+
+model ConfidentialOpening {
+  id         String   @id @default(cuid())
+  accountId  String
+  eventKey   String
+  ciphertext String
+  createdAt  DateTime @default(now())
+
+  account MultisigAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, eventKey])
+  @@index([accountId])
+}
